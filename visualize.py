@@ -2,7 +2,8 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-from matplotlib.widgets import Slider
+from matplotlib.widgets import Slider, RectangleSelector
+
 import os
 import argparse
 
@@ -64,11 +65,15 @@ class WaveformVisualizer:
         self.fig.canvas.mpl_connect('key_press_event', self.on_key)
         self.ax.callbacks.connect('xlim_changed', self.on_xlim_changed)
 
-        # Enable "Zoom to Rectangle" by default
-        try:
-            self.fig.canvas.toolbar.zoom()
-        except AttributeError:
-            pass
+        # Custom Rectangle Selector
+        self.rs = RectangleSelector(
+            self.ax, self.on_select,
+            useblit=True,
+            button=[1],  # Left mouse button
+            minspanx=5, minspany=5,
+            spancoords='pixels',
+            interactive=False
+        )
 
         # Initial View
         self.update_view(0, INITIAL_WINDOW_SEC)
@@ -272,6 +277,75 @@ class WaveformVisualizer:
             new_width = MAX_WIDTH_SEC
             new_start = center - (new_width / 2)
             self.update_view(new_start, new_width)
+
+    def on_select(self, eclick, erelease):
+        """Handle rectangle selection."""
+        if self.navigating: return
+
+        # Calculate new ranges from the selection
+        x1, y1 = eclick.xdata, eclick.ydata
+        x2, y2 = erelease.xdata, erelease.ydata
+
+        start_time = min(x1, x2)
+        end_time = max(x1, x2)
+        width = end_time - start_time
+
+        # Enforce minimum width
+        if width < self.min_width_sec:
+            center = (start_time + end_time) / 2
+            width = self.min_width_sec
+            start_time = center - width / 2
+
+        # Clamp start time
+        start_time = max(0, min(start_time, self.duration_sec - width))
+
+        # Update view (which reloads data)
+        # Note: update_view handles height scaling automatically based on data,
+        # but if we want to respect the user's Y selection we might need to override.
+        # However, for audio, usually we want to see the full amplitude or auto-scaled.
+        # The user asked for "arbitrary zooming be implemented", which implies Y might be important.
+        # But our `update_view` forces Y symmetry currently.
+        # Let's trust `update_view` for now as it handles the complexity of data loading.
+        # If we really want to zoom to the Y rectangle, we would set ylim manually.
+        # Given the previous context was about "Zoom to Rectangle" interfering with "movement and zoom control",
+        # let's try to match the "Zoom to Rectangle" behavior which DOES set specific X/Y limits.
+
+        # However, our update_view logic re-calculates Y based on data in the new X range...
+        # Let's modify the flow slightly: use update_view for X, then apply Y if it makes sense?
+        # Actually, standard audio visualization often keeps Y symmetric or 0-1.
+        # If the user draws a small box on a peak, they expect to zoom into that peak (Y-wise too).
+
+        # So let's set limits directly, similar to on_scroll/on_key, but for both axes.
+
+        if self.navigating: return
+        self.navigating = True
+        try:
+             # X Axis Logic
+             new_width = max(self.min_width_sec, min(width, MAX_WIDTH_SEC))
+             # If user selected < min width, we centered it above.
+
+             self.get_chunk(start_time, new_width)
+
+             self.ax.set_xlim(start_time, start_time + new_width)
+
+             # Y Axis Logic
+             y_min = min(y1, y2)
+             y_max = max(y1, y2)
+
+             self.ax.set_ylim(y_min, y_max)
+
+             self.fig.canvas.draw_idle()
+
+             # Sync Slider
+             if hasattr(self, 'slider'):
+                 old_eventson = self.slider.eventson
+                 self.slider.eventson = False
+                 self.slider.set_val(start_time)
+                 self.slider.eventson = old_eventson
+
+        finally:
+            self.navigating = False
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Linux Audio Waveform Visualizer 2026 (mmap)")
